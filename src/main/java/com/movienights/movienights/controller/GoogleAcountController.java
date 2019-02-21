@@ -1,25 +1,24 @@
 package com.movienights.movienights.controller;
 
-import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeTokenRequest;
-import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
-import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
-import com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.api.client.googleapis.auth.oauth2.*;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.jackson2.JacksonFactory;
 import com.google.api.client.util.DateTime;
 import com.google.api.services.calendar.Calendar;
 import com.google.api.services.calendar.model.Event;
+import com.google.api.services.calendar.model.EventDateTime;
 import com.google.api.services.calendar.model.Events;
-import com.movienights.movienights.entity.Movie;
+import com.movienights.movienights.entity.EventBooking;
+import com.movienights.movienights.entity.Period;
 import com.movienights.movienights.entity.User;
-import com.movienights.movienights.repository.MovieRepository;
+import com.movienights.movienights.repository.EventBookingRepository;
 import com.movienights.movienights.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
-
 import java.io.IOException;
-import java.sql.Connection;
-import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 @RestController
@@ -28,8 +27,19 @@ public class GoogleAcountController {
     @Autowired
     private UserRepository userRepository;
 
-     final String CLIENT_ID = "126121553255-v7skv38gdish61psrj3uaugngkbh9tum.apps.googleusercontent.com";
-     final String CLIENT_SECRET ="x2lm9fjlhrJQxINC_IGfUJ4m";
+    @Autowired
+    private EventBookingRepository eventBookingRepository;
+
+    final String CLIENT_ID = "126121553255-v7skv38gdish61psrj3uaugngkbh9tum.apps.googleusercontent.com";
+    final String CLIENT_SECRET = "x2lm9fjlhrJQxINC_IGfUJ4m";
+
+
+    public static <T> T firstNonNull(T... params) {
+        for (T param : params)
+            if (param != null)
+                return param;
+        return null;
+    }
 
     @RequestMapping(value = "/storeauthcode", method = RequestMethod.POST)
     public String storeauthcode(@RequestBody String code, @RequestHeader("X-Requested-With") String encoding) {
@@ -57,16 +67,6 @@ public class GoogleAcountController {
         String accessToken = tokenResponse.getAccessToken();
         String refreshToken = tokenResponse.getRefreshToken();
         Long expiresAt = System.currentTimeMillis() + (tokenResponse.getExpiresInSeconds() * 1000);
-
-        User user = new User();
-        user.setAccessToken(accessToken);
-        user.setRefreshToken(refreshToken);
-        user.setExpiresAt(expiresAt);
-        userRepository.save(user);
-
-        //movieRepository.save(accessToken);
-
-        //statement = connection.createStatement();
 
         // Debug purpose only
         System.out.println("accessToken: " + accessToken);
@@ -103,59 +103,170 @@ public class GoogleAcountController {
         System.out.println("familyName: " + familyName);
         System.out.println("givenName: " + givenName);
 
-        // Use an accessToken previously gotten to call Google's API
-        GoogleCredential credential = new GoogleCredential().setAccessToken(accessToken);
-        Calendar calendar =
-                new Calendar.Builder(new NetHttpTransport(), JacksonFactory.getDefaultInstance(), credential)
-                        .setApplicationName("Movie Nights")
-                        .build();
+        User user = new User(name,email,accessToken,refreshToken,expiresAt);
+        userRepository.save(user);
+
+        return "OK";
+    }
 
 
- // List the next 10 events from the primary calendar.
- //   Instead of printing these with System out, you should ofcourse store them in a database or in-memory variable to use for your application.
-//{1}
-  //  The most important parts are:
-  // Event event = new Event();
-//
-//    event.getSummary();         // Title of calendar event
-//    event.getStart().getDateTime(); // Start-time of event
-//    event.getEnd().getDateTime();   // Start-time of event
-//    event.getStart().getDate();     // Start-date (without time) of event
-//    event.getEnd().getDate();       // End-date (without time) of event
-////{1}
- //   For more methods and properties, see: Google Calendar Documentation.
-
-        DateTime now = new DateTime(System.currentTimeMillis());
-        Events events = null;
+    private GoogleCredential getRefreshedCredentials(String refreshCode) {
         try {
-            events = calendar.events().list("primary")
-                    .setMaxResults(10)
-                    .setTimeMin(now)
-                    .setOrderBy("startTime")
-                    .setSingleEvents(true)
+            GoogleTokenResponse response = new GoogleRefreshTokenRequest(
+                    new NetHttpTransport(),
+                    JacksonFactory.getDefaultInstance(),
+                    refreshCode,
+                    CLIENT_ID,
+                    CLIENT_SECRET )
                     .execute();
-        } catch (IOException e) {
-            e.printStackTrace();
+
+            return new GoogleCredential().setAccessToken(response.getAccessToken());
         }
-        List<Event> items = events.getItems();
-        if (items.isEmpty()) {
-            System.out.println("No upcoming events found.");
-        } else {
-            System.out.println("Upcoming events");
-            for (Event event : items) {
-                DateTime start = event.getStart().getDateTime();
-                if (start == null) { // If it's an all-day-event - store the date instead
-                    start = event.getStart().getDate();
+        catch( Exception ex ){
+            ex.printStackTrace();
+            return null;
+        }
+    }
+
+
+    @RequestMapping(value = "/availableTimes", method = RequestMethod.GET)
+    public List<Period> getAvailableTimes() {
+
+        List<Event> allEvents = new ArrayList<>();
+
+        List<Period> unreservedTimes = new ArrayList<>();
+
+        for (User user : userRepository.findAll()) {
+
+            Long expiredTime = user.getExpiresAt();
+            Long currentTime = System.currentTimeMillis();
+
+            GoogleCredential cred;
+
+            if( expiredTime < currentTime ) {
+                cred = getRefreshedCredentials(user.getRefreshToken());
+                user.setAccessToken(cred.getAccessToken());
+                user.setExpiresAt(System.currentTimeMillis() + 3600*1000);
+                userRepository.save(user);
+            } else {
+                cred = new GoogleCredential().setAccessToken(user.getAccessToken());
+            }
+
+            Calendar calendar = getCalendar(cred);
+
+            DateTime now = new DateTime(System.currentTimeMillis());
+            Events events = null;
+
+            try {
+                events = calendar.events().list("primary")
+                        .setMaxResults(10)
+                        .setTimeMin(now)
+                        .setOrderBy("startTime")
+                        .setSingleEvents(true)
+                        .execute();
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            List<Event> items = events.getItems();
+
+
+            if (items.isEmpty()) {
+                System.out.println("No upcoming events found.");
+            } else {
+                System.out.println("Upcoming events");
+                for (Event event : items) {
+                    allEvents.add(event);
+
+                    DateTime start = event.getStart().getDateTime();
+                    if (start == null) {
+                        start = event.getStart().getDate();
+                    }
+                    DateTime end = event.getEnd().getDateTime();
+                    if (end == null) {
+                        end = event.getStart().getDate();
+                    }
+                    System.out.printf("%s (%s) -> (%s)\n", event.getSummary(), start, end);
                 }
-                DateTime end = event.getEnd().getDateTime();
-                if (end == null) { // If it's an all-day-event - store the date instead
-                    end = event.getStart().getDate();
-                }
-                System.out.printf("%s (%s) -> (%s)\n", event.getSummary(), start, end);
             }
         }
 
-        return "OK";
+        for (Event event : allEvents) {
+            DateTime start = firstNonNull(event.getStart().getDateTime(), event.getStart().getDate());
+            System.out.printf("%s (%s)\n", event.getSummary(), start);
+        }
+
+        allEvents.sort(Comparator.comparing(event -> firstNonNull(event.getStart().getDateTime(), event.getStart().getDate()).getValue()));
+
+        Period nowToNext = new Period(
+                new DateTime(System.currentTimeMillis()),
+                firstNonNull(allEvents.get(0).getStart().getDateTime(), allEvents.get(0).getStart().getDate())
+        );
+        unreservedTimes.add(nowToNext);
+
+        for (int i = 0; i < allEvents.size() - 1; i++) {
+            Period periodBetweenEvents = new Period(firstNonNull(allEvents.get(i).getEnd().getDateTime(), allEvents.get(i).getEnd().getDate()),
+                    firstNonNull(allEvents.get(i + 1).getStart().getDateTime(), allEvents.get(i + 1).getStart().getDate()));
+            unreservedTimes.add(periodBetweenEvents);
+        }
+        System.out.println(unreservedTimes);
+
+        Period lastEventPlusAMonth = new Period(
+                firstNonNull(allEvents.get(allEvents.size() -1).getEnd().getDateTime(), allEvents.get(allEvents.size() - 1).getEnd().getDate()),
+                new DateTime(  firstNonNull(allEvents.get(allEvents.size() -1).getEnd().getDateTime(), allEvents.get(allEvents.size() - 1).getEnd().getDate()).getValue()
+                        + 31*24*60*60*1000L)
+        );
+        unreservedTimes.add(lastEventPlusAMonth);
+
+        return unreservedTimes;
+    }
+
+    @CrossOrigin(origins = "*")
+    @JsonProperty("eventBooking")
+    @PostMapping(value = "/booking")
+    public void showBookingInfo(@RequestBody EventBooking eventBooking) throws IOException {
+
+        for( User user : userRepository.findAll()) {
+            GoogleCredential credential = getRefreshedCredentials(user.getRefreshToken());
+            Calendar calendar = getCalendar(credential);
+
+            Event event = new Event()
+                    .setSummary("New Movie")
+                    .setLocation("MovieNight")
+                    .setDescription("");
+
+            DateTime startDateTime = new DateTime( Long.parseLong(eventBooking.getStart()) );
+            EventDateTime start = new EventDateTime()
+                    .setDateTime(startDateTime)
+                    .setTimeZone("CET");
+            event.setStart(start);
+
+            DateTime endDateTime = new DateTime( Long.parseLong(eventBooking.getEnd()) );
+            EventDateTime end = new EventDateTime()
+                    .setDateTime(endDateTime)
+                    .setTimeZone("CET");
+            event.setEnd(end);
+
+            String calendarId = "primary";
+
+            event = calendar.events().insert(calendarId, event).execute();
+            System.out.printf("Event created: %s\n", event.getHtmlLink());
+        }
+
+        System.out.println("the post was a success!");
+        System.out.println( Long.parseLong(eventBooking.getStart()) );
+
+        eventBookingRepository.save(eventBooking);
+    }
+
+    public Calendar getCalendar(GoogleCredential credential) {
+        return new Calendar.Builder(
+                new NetHttpTransport(),
+                JacksonFactory.getDefaultInstance(),
+                credential)
+                .setApplicationName("Movie Nights")
+                .build();
     }
 
 }
