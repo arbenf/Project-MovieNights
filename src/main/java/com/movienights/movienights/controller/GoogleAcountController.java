@@ -236,13 +236,13 @@ public class GoogleAcountController {
                     .setLocation("MovieNight")
                     .setDescription("");
 
-            DateTime startDateTime = new DateTime( Long.parseLong(eventBooking.getStart()) );
+            DateTime startDateTime = new DateTime( Long.parseLong(eventBooking.getEnd()) );
             EventDateTime start = new EventDateTime()
                     .setDateTime(startDateTime)
                     .setTimeZone("CET");
             event.setStart(start);
 
-            DateTime endDateTime = new DateTime( Long.parseLong(eventBooking.getEnd()) );
+            DateTime endDateTime = new DateTime( Long.parseLong(eventBooking.getStart()) );
             EventDateTime end = new EventDateTime()
                     .setDateTime(endDateTime)
                     .setTimeZone("CET");
