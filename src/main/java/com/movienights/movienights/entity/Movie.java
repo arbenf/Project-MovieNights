@@ -1,5 +1,8 @@
 package com.movienights.movienights.entity;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import javax.persistence.Entity;
 import javax.persistence.GeneratedValue;
 import javax.persistence.Id;
@@ -9,6 +12,8 @@ public class Movie {
     @Id
     @GeneratedValue
     private int id;
+
+    @JsonAlias("Title")
     private String title;
     private float imdbRating;
 
